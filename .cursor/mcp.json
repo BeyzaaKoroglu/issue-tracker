@@ -1,0 +1,7 @@
+{
+    "mcpServers": {
+        "wyndbase": {
+            "url": "https://dev.wyndbase.dev/mcp"
+        }
+    }
+}
