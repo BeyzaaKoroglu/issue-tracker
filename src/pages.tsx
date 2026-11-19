@@ -57,7 +57,7 @@ export function Board({ go, initialProjectId = '' }: { go: (path: string) => voi
   const [over, setOver] = useState<string | null>(null)
   const skipClick = useRef(false)
   const myTeams = new Set((teams.data ?? []).map((row) => row.teamId))
-  const writableProjects = (projects.data ?? []).filter((row) => row.teamId && myTeams.has(row.teamId))
+  const allProjects = projects.data ?? []
   const dragged = (issues.data ?? []).find((row) => row._id === dragId) ?? null
 
   function onTeam(issue: Issue) {
@@ -83,7 +83,7 @@ export function Board({ go, initialProjectId = '' }: { go: (path: string) => voi
   })
 
   return (
-    <Page title="Pano" lede="Kartı izin verilen sütuna sürükleyerek durumunu değiştir. Takım dışındakiler kartı görecek, taşıyamayacak.">
+    <Page title="Pano" lede="Herkes issue açar ve atar. Durumu yalnızca projenin takımı değiştirir.">
       <div className="mb-4 flex flex-wrap items-end gap-3">
         <div className="w-56">
           <Field label="Arama">
@@ -123,7 +123,7 @@ export function Board({ go, initialProjectId = '' }: { go: (path: string) => voi
           <input type="checkbox" checked={mine} onChange={(event) => setMine(event.target.checked)} />
           Bana atananlar
         </label>
-        {roles.write && writableProjects.length > 0 ? (
+        {allProjects.length > 0 ? (
           <Button tone="ghost" onClick={() => setOpen((value) => !value)}>
             Yeni issue
           </Button>
@@ -175,9 +175,9 @@ export function Board({ go, initialProjectId = '' }: { go: (path: string) => voi
           <Banner>{error}</Banner>
         </div>
       ) : null}
-      {open && writableProjects.length > 0 ? (
+      {open && allProjects.length > 0 ? (
         <NewIssue
-          projects={writableProjects}
+          projects={allProjects}
           onDone={async () => {
             setOpen(false)
             await refresh('desk.listIssues', 'desk.listProjects')
@@ -480,6 +480,15 @@ export function IssuePage({ id, go }: { id: string; go: (path: string) => void }
             </p>
             <Line k="Raporlayan" v={row.reporterName} />
             <Line k="Atanan" v={row.assigneeName} />
+            {!canEdit && row.projectId ? (
+              <AssignBox
+                projectId={row.projectId}
+                assigneeId={row.assigneeId}
+                onSave={(assigneeId) =>
+                  act(() => write('desk.assignIssue', { id: row._id, assigneeId }), ['desk.getIssue', 'desk.listIssues', 'desk.listActivity'])
+                }
+              />
+            ) : null}
             <Line k="Sprint" v={row.sprintName} />
             <Line k="Talep sahibi" v={row.requesterName} />
             <Line k="E-posta" v={row.requesterEmail} />
@@ -526,6 +535,42 @@ export function IssuePage({ id, go }: { id: string; go: (path: string) => void }
           </Card>
         </div>
       </div>
+    </div>
+  )
+}
+
+function AssignBox({
+  projectId,
+  assigneeId,
+  onSave,
+}: {
+  projectId: string
+  assigneeId: string | null
+  onSave: (assigneeId: string | null) => Promise<void>
+}) {
+  const members = useRead<Member>('desk.listProjectMembers', { projectId }, !!projectId)
+  const [value, setValue] = useState(assigneeId ?? '')
+  const [pending, setPending] = useState(false)
+  return (
+    <div className="space-y-2 border-t border-line pt-3">
+      <Field label="Atama">
+        <Select value={value} onChange={(event) => setValue(event.target.value)}>
+          <option value="">Yok</option>
+          {(members.data ?? []).map((member) => (
+            <option key={member.userId} value={member.userId}>{member.name ?? member.username}</option>
+          ))}
+        </Select>
+      </Field>
+      <Button
+        type="button"
+        disabled={pending}
+        onClick={() => {
+          setPending(true)
+          void onSave(blank(value)).finally(() => setPending(false))
+        }}
+      >
+        {pending ? 'Kaydediliyor…' : 'Ata'}
+      </Button>
     </div>
   )
 }
