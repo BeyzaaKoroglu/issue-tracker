@@ -15,10 +15,14 @@ import {
   type Issue,
   type IssueDetail,
   type Me,
+  type Member,
+  type MyTeam,
   type Project,
   type Release,
   type Requester,
+  type SavedSearch,
   type Sprint,
+  type TeamRow,
   type UserRow,
   type Worklog,
 } from './model'
@@ -34,25 +38,40 @@ function useMeId() {
 export function Board({ go }: { go: (path: string) => void }) {
   const issues = useRead<Issue>('desk.listIssues')
   const projects = useRead<Project>('desk.listProjects')
-  const users = useRead<UserRow>('desk.listUsers')
+  const teams = useRead<MyTeam>('desk.listMyTeams')
+  const saved = useRead<SavedSearch>('desk.listMySearches')
   const roles = useRoles()
   const me = useMeId()
   const refresh = useRefresh()
   const [projectId, setProjectId] = useState('')
+  const [status, setStatus] = useState('')
+  const [term, setTerm] = useState('')
   const [mine, setMine] = useState(false)
+  const [bookmark, setBookmark] = useState('')
   const [open, setOpen] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const myTeams = new Set((teams.data ?? []).map((row) => row.teamId))
+  const writableProjects = (projects.data ?? []).filter((row) => row.teamId && myTeams.has(row.teamId))
 
   const rows = (issues.data ?? []).filter((row) => {
     if (projectId && row.projectId !== projectId) return false
+    if (status && row.status !== status) return false
     if (mine && row.assigneeId !== me?._id) return false
-    return true
+    const needle = term.trim().toLocaleLowerCase('tr')
+    if (!needle) return true
+    const haystack = `${row.projectKey}-${row.number} ${row.title}`.toLocaleLowerCase('tr')
+    return haystack.includes(needle)
   })
 
   return (
-    <Page title="Pano" lede="Issue'lar duruma göre. Kritik ve geciken işler Kerem'in uyarılarında da durur.">
+    <Page title="Pano" lede="Takım dışındaki kişiler issue'ları görür, değiştiremez. Atama yalnızca projenin takımına yapılır.">
       <div className="mb-4 flex flex-wrap items-end gap-3">
         <div className="w-56">
+          <Field label="Arama">
+            <TextInput value={term} onChange={(event) => setTerm(event.target.value)} placeholder="Başlık veya anahtar" />
+          </Field>
+        </div>
+        <div className="w-44">
           <Field label="Proje">
             <Select value={projectId} onChange={(event) => setProjectId(event.target.value)}>
               <option value="">Tümü</option>
@@ -64,25 +83,75 @@ export function Board({ go }: { go: (path: string) => void }) {
             </Select>
           </Field>
         </div>
+        <div className="w-44">
+          <Field label="Durum">
+            <Select value={status} onChange={(event) => setStatus(event.target.value)}>
+              <option value="">Tümü</option>
+              {columns.map((value) => (
+                <option key={value} value={value}>{statusLabel[value]}</option>
+              ))}
+            </Select>
+          </Field>
+        </div>
         <label className="flex items-center gap-2 pb-2 text-sm">
           <input type="checkbox" checked={mine} onChange={(event) => setMine(event.target.checked)} />
           Bana atananlar
         </label>
-        {roles.write ? (
+        {roles.write && writableProjects.length > 0 ? (
           <Button tone="ghost" onClick={() => setOpen((value) => !value)}>
             Yeni issue
           </Button>
         ) : null}
+      </div>
+      <div className="mb-4 flex flex-wrap items-center gap-2">
+        <TextInput className="max-w-56" value={bookmark} onChange={(event) => setBookmark(event.target.value)} placeholder="Arama adı" />
+        <Button
+          tone="ghost"
+          disabled={!bookmark.trim()}
+          onClick={() =>
+            void write('desk.saveSearch', {
+              name: bookmark.trim(),
+              term: blank(term),
+              status: blank(status),
+              onlyMine: mine,
+              projectId: blank(projectId),
+            })
+              .then(() => refresh('desk.listMySearches'))
+              .then(() => setBookmark(''))
+              .catch((cause: unknown) => setError(errorText(cause)))
+          }
+        >
+          Aramayı kaydet
+        </Button>
+        {(saved.data ?? []).map((row) => (
+          <span key={row._id} className="inline-flex items-center gap-1 rounded-full bg-white px-2 py-1 text-sm">
+            <button
+              onClick={() => {
+                setTerm(row.term ?? '')
+                setStatus(row.status ?? '')
+                setMine(row.onlyMine)
+                setProjectId(row.projectId ?? '')
+              }}
+            >
+              {row.name}
+            </button>
+            <button
+              className="text-stone-400"
+              onClick={() => void write('desk.deleteSearch', { id: row._id }).then(() => refresh('desk.listMySearches'))}
+            >
+              ×
+            </button>
+          </span>
+        ))}
       </div>
       {error ? (
         <div className="mb-4">
           <Banner>{error}</Banner>
         </div>
       ) : null}
-      {open && roles.write ? (
+      {open && writableProjects.length > 0 ? (
         <NewIssue
-          projects={projects.data ?? []}
-          users={users.data ?? []}
+          projects={writableProjects}
           onDone={async () => {
             setOpen(false)
             await refresh('desk.listIssues', 'desk.listProjects')
@@ -126,31 +195,31 @@ export function Board({ go }: { go: (path: string) => void }) {
 
 function NewIssue({
   projects,
-  users,
   onDone,
   onError,
 }: {
   projects: Project[]
-  users: UserRow[]
   onDone: () => Promise<void>
   onError: (message: string) => void
 }) {
   const [pending, setPending] = useState(false)
+  const [projectId, setProjectId] = useState(projects[0]?._id ?? '')
+  const members = useRead<Member>('desk.listProjectMembers', { projectId }, !!projectId)
   async function submit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault()
     const data = new FormData(event.currentTarget)
     setPending(true)
     onError('')
     try {
-      const body = String(data.get('body') ?? '').trim()
+      const text = String(data.get('body') ?? '').trim()
       await write('desk.createIssue', {
-        projectId: data.get('projectId'),
+        projectId,
         title: data.get('title'),
         kind: data.get('kind'),
         priority: data.get('priority'),
         assigneeId: blank(String(data.get('assignee') ?? '')),
         dueOn: blank(String(data.get('dueOn') ?? '')),
-        body: body ? { body, attachments: [] } : null,
+        body: text ? { body: text, attachments: [] } : null,
       })
       await onDone()
     } catch (cause) {
@@ -163,7 +232,7 @@ function NewIssue({
     <Card className="mb-4 p-4">
       <form className="grid gap-3 md:grid-cols-2" onSubmit={(event) => void submit(event)}>
         <Field label="Proje">
-          <Select name="projectId" required defaultValue={projects[0]?._id}>
+          <Select name="projectId" required value={projectId} onChange={(event) => setProjectId(event.target.value)}>
             {projects.map((row) => (
               <option key={row._id} value={row._id}>
                 {row.key} · {row.name}
@@ -195,8 +264,8 @@ function NewIssue({
         <Field label="Atanan">
           <Select name="assignee" defaultValue="">
             <option value="">Sonra</option>
-            {users.map((row) => (
-              <option key={row._id} value={row._id}>
+            {(members.data ?? []).map((row) => (
+              <option key={row.userId} value={row.userId}>
                 {row.name ?? row.username}
               </option>
             ))}
@@ -225,7 +294,9 @@ export function IssuePage({ id, go }: { id: string; go: (path: string) => void }
   const comments = useRead<Comment>('desk.listComments', { issueId: id })
   const work = useRead<Worklog>('desk.listWorklogs', { issueId: id })
   const activity = useRead<Activity>('desk.listActivity', { issueId: id })
-  const users = useRead<UserRow>('desk.listUsers')
+  const members = useRead<Member>('desk.listProjectMembers', { projectId: issue.data?.[0]?.projectId ?? '' }, !!issue.data?.[0]?.projectId)
+  const projects = useRead<Project>('desk.listProjects')
+  const mine = useRead<MyTeam>('desk.listMyTeams')
   const sprints = useRead<Sprint>('desk.listSprints')
   const releases = useRead<Release>('desk.listReleases')
   const requesters = useRead<Requester>('desk.listRequesters')
@@ -234,8 +305,10 @@ export function IssuePage({ id, go }: { id: string; go: (path: string) => void }
   const refresh = useRefresh()
   const [error, setError] = useState<string | null>(null)
   const row = issue.data?.[0]
-  const canEdit = !!row && roles.write && (roles.manage || roles.has('tester') || (roles.has('gelistirici') && owns(me, row)))
-  const allowed = row ? (moves[row.status] ?? []).filter((move) => roles.has(...move.roles)) : []
+  const projectTeam = (projects.data ?? []).find((item) => item._id === row?.projectId)?.teamId
+  const onTeam = !!projectTeam && (mine.data ?? []).some((item) => item.teamId === projectTeam)
+  const canEdit = !!row && onTeam && roles.write && (roles.manage || roles.has('tester') || (roles.has('gelistirici') && owns(me, row)))
+  const allowed = row && onTeam ? (moves[row.status] ?? []).filter((move) => roles.has(...move.roles)) : []
 
   async function act(action: () => Promise<unknown>, names: string[]) {
     setError(null)
@@ -293,16 +366,22 @@ export function IssuePage({ id, go }: { id: string; go: (path: string) => void }
           {canEdit ? (
             <EditIssue
               row={row}
-              users={users.data ?? []}
+              members={members.data ?? []}
               sprints={(sprints.data ?? []).filter((sprint) => sprint.projectId === row.projectId)}
               releases={(releases.data ?? []).filter((release) => release.projectId === row.projectId)}
               requesters={requesters.data ?? []}
-              onSave={(params) => act(() => write('desk.updateIssue', params), ['desk.getIssue', 'desk.listIssues'])}
+              onSave={(params) =>
+                act(async () => {
+                  const { description, ...rest } = params
+                  await write('desk.updateIssue', rest)
+                  await write('desk.updateIssueBody', { id: row._id, body: { body: String(description ?? ''), attachments: [] } })
+                }, ['desk.getIssue', 'desk.listIssues'])
+              }
             />
           ) : null}
           <Comments
             rows={(comments.data ?? []).filter((item) => roles.seeInternal || !item.internal)}
-            canWrite={roles.write}
+            canWrite={onTeam && roles.write}
             canInternal={roles.seeInternal}
             onAdd={(body, internal) =>
               act(
@@ -313,7 +392,7 @@ export function IssuePage({ id, go }: { id: string; go: (path: string) => void }
           />
           <Work
             rows={work.data ?? []}
-            canWrite={roles.write}
+            canWrite={onTeam && roles.write}
             onAdd={(minutes, spentOn, text) =>
               act(() => write('desk.logWork', { issueId: id, minutes, spentOn, note: text }), ['desk.listWorklogs'])
             }
@@ -384,14 +463,14 @@ function Line({ k, v }: { k: string; v: string | number | null | undefined }) {
 
 function EditIssue({
   row,
-  users,
+  members,
   sprints,
   releases,
   requesters,
   onSave,
 }: {
   row: IssueDetail
-  users: UserRow[]
+  members: Member[]
   sprints: Sprint[]
   releases: Release[]
   requesters: Requester[]
@@ -418,7 +497,7 @@ function EditIssue({
       estimateHours: hours ? Number(hours) : null,
       environment: blank(String(data.get('environment') ?? '')),
       blocked: data.get('blocked') === 'on',
-      body: { body: String(data.get('body') ?? ''), attachments: [] },
+      description: String(data.get('body') ?? ''),
     })
     setPending(false)
   }
@@ -447,8 +526,8 @@ function EditIssue({
         <Field label="Atanan">
           <Select name="assignee" defaultValue={row.assigneeId ?? ''}>
             <option value="">Yok</option>
-            {users.map((user) => (
-              <option key={user._id} value={user._id}>{user.name ?? user.username}</option>
+            {members.map((member) => (
+              <option key={member.userId} value={member.userId}>{member.name ?? member.username}</option>
             ))}
           </Select>
         </Field>
@@ -600,6 +679,7 @@ function Work({
 export function Projects() {
   const projects = useRead<Project>('desk.listProjects')
   const users = useRead<UserRow>('desk.listUsers')
+  const teams = useRead<TeamRow>('desk.listTeams')
   const roles = useRoles()
   const refresh = useRefresh()
   const [error, setError] = useState<string | null>(null)
@@ -630,6 +710,7 @@ export function Projects() {
               key: String(data.get('key') ?? '').trim().toUpperCase(),
               name: data.get('name'),
               leadId: data.get('lead'),
+              teamId: data.get('team'),
               site: blank(String(data.get('site') ?? '')),
               startsOn: blank(String(data.get('startsOn') ?? '')),
               language: blank(String(data.get('language') ?? '')),
@@ -643,6 +724,13 @@ export function Projects() {
           <h2 className="font-medium">Yeni proje</h2>
           <Field label="Anahtar"><TextInput name="key" required maxLength={8} /></Field>
           <Field label="Ad"><TextInput name="name" required /></Field>
+          <Field label="Takım">
+            <Select name="team" required>
+              {(teams.data ?? []).map((team) => (
+                <option key={team._id} value={team._id}>{team.name}</option>
+              ))}
+            </Select>
+          </Field>
           <Field label="Lider">
             <Select name="lead" required>
               {(users.data ?? []).map((user) => (

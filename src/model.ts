@@ -116,6 +116,17 @@ export type Project = {
 
 export type UserRow = { _id: string; username: string; name: string | null }
 export type TeamRow = { _id: string; name: string }
+export type MyTeam = { _id: string; teamId: string; teamName: string; kind: string }
+export type Member = { _id: string; userId: string; username: string; name: string | null; kind: string }
+export type SavedSearch = {
+  _id: string
+  name: string
+  term: string | null
+  status: string | null
+  onlyMine: boolean
+  projectId: string | null
+  projectKey: string | null
+}
 export type Sprint = {
   _id: string
   name: string
