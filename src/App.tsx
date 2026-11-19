@@ -1,44 +1,47 @@
 import { useEffect, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { useAuthStore } from '@wyndbase/sdk/react'
-import { Board, IssuePage, People, Projects, Requesters, Sprints } from './pages'
+import { Board, IssuePage, People, Projects, Requesters, Sprints, Teams } from './pages'
 import { InboxPage } from './inbox'
 import { Login, useMe, useRoles } from './session'
 import { loginPath, session, wyndbase } from './wyndbase'
 
 type Route =
-  | { name: 'board' }
+  | { name: 'board'; projectId: string }
   | { name: 'issue'; id: string }
   | { name: 'projects' }
+  | { name: 'teams' }
   | { name: 'sprints' }
   | { name: 'requesters' }
   | { name: 'inbox' }
   | { name: 'people' }
 
-function parse(path: string): Route {
+function parse(path: string, search: string): Route {
   const parts = path.split('/').filter(Boolean)
   if (parts[0] === 'issue' && parts[1]) return { name: 'issue', id: parts[1] }
   if (parts[0] === 'projeler') return { name: 'projects' }
+  if (parts[0] === 'takimlar') return { name: 'teams' }
   if (parts[0] === 'sprintler') return { name: 'sprints' }
   if (parts[0] === 'talepler') return { name: 'requesters' }
   if (parts[0] === 'gelen') return { name: 'inbox' }
   if (parts[0] === 'ekip') return { name: 'people' }
-  return { name: 'board' }
+  return { name: 'board', projectId: new URLSearchParams(search).get('proje') ?? '' }
 }
 
 function useRoute() {
-  const [path, setPath] = useState(window.location.pathname)
+  const [href, setHref] = useState(() => window.location.pathname + window.location.search)
   useEffect(() => {
-    const onPop = () => setPath(window.location.pathname)
+    const onPop = () => setHref(window.location.pathname + window.location.search)
     window.addEventListener('popstate', onPop)
     return () => window.removeEventListener('popstate', onPop)
   }, [])
+  const url = new URL(href, window.location.origin)
   return {
-    path,
-    route: parse(path),
+    path: url.pathname,
+    route: parse(url.pathname, url.search),
     go(next: string) {
       window.history.pushState(null, '', next)
-      setPath(next)
+      setHref(next)
     },
   }
 }
@@ -68,6 +71,7 @@ function Desk() {
 const nav = [
   ['/', 'Pano'],
   ['/projeler', 'Projeler'],
+  ['/takimlar', 'Takımlar'],
   ['/sprintler', 'Sprintler'],
   ['/talepler', 'Talepler'],
   ['/gelen', 'Gelen'],
@@ -89,7 +93,7 @@ function Shell({ route, go }: { route: Route; go: (path: string) => void }) {
         </div>
         <nav className="flex gap-1 overflow-x-auto px-3 pb-4 md:block md:space-y-1">
           {nav.map(([href, text]) => {
-            const active = href === '/' ? route.name === 'board' : window.location.pathname.startsWith(href)
+            const active = href === '/' ? route.name === 'board' : window.location.pathname === href
             return (
               <button
                 key={href}
@@ -122,9 +126,10 @@ function Shell({ route, go }: { route: Route; go: (path: string) => void }) {
           </div>
         </header>
         <main className="px-4 py-6 sm:px-6">
-          {route.name === 'board' ? <Board go={go} /> : null}
+          {route.name === 'board' ? <Board go={go} initialProjectId={route.projectId} /> : null}
           {route.name === 'issue' ? <IssuePage id={route.id} go={go} /> : null}
-          {route.name === 'projects' ? <Projects /> : null}
+          {route.name === 'projects' ? <Projects go={go} /> : null}
+          {route.name === 'teams' ? <Teams /> : null}
           {route.name === 'sprints' ? <Sprints /> : null}
           {route.name === 'requesters' ? <Requesters /> : null}
           {route.name === 'inbox' ? <InboxPage /> : null}

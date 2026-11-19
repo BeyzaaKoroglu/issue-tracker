@@ -116,6 +116,20 @@ export type Project = {
 
 export type UserRow = { _id: string; username: string; name: string | null }
 export type TeamRow = { _id: string; name: string }
+export type AuthTeam = {
+  _id: string
+  name: string
+  parent: string | null
+  leadScope: string | null
+  managedBy: string | null
+}
+export type TeamMembership = {
+  _id: string
+  kind: string | null
+  userId: string | null
+  username: string | null
+  name: string | null
+}
 export type MyTeam = { _id: string; teamId: string; teamName: string; kind: string }
 export type Member = { _id: string; userId: string; username: string; name: string | null; kind: string }
 export type SavedSearch = {

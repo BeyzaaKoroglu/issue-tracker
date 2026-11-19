@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { note, useRead, useRefresh } from './data'
 import {
   blank,
@@ -12,6 +12,7 @@ import {
   statusLabel,
   type Activity,
   type Comment,
+  type AuthTeam,
   type Issue,
   type IssueDetail,
   type Me,
@@ -22,6 +23,7 @@ import {
   type Requester,
   type SavedSearch,
   type Sprint,
+  type TeamMembership,
   type TeamRow,
   type UserRow,
   type Worklog,
@@ -35,7 +37,7 @@ function useMeId() {
   return me.data as Me | undefined
 }
 
-export function Board({ go }: { go: (path: string) => void }) {
+export function Board({ go, initialProjectId = '' }: { go: (path: string) => void; initialProjectId?: string }) {
   const issues = useRead<Issue>('desk.listIssues')
   const projects = useRead<Project>('desk.listProjects')
   const teams = useRead<MyTeam>('desk.listMyTeams')
@@ -43,15 +45,32 @@ export function Board({ go }: { go: (path: string) => void }) {
   const roles = useRoles()
   const me = useMeId()
   const refresh = useRefresh()
-  const [projectId, setProjectId] = useState('')
+  const [projectId, setProjectId] = useState(initialProjectId)
+  useEffect(() => setProjectId(initialProjectId), [initialProjectId])
   const [status, setStatus] = useState('')
   const [term, setTerm] = useState('')
   const [mine, setMine] = useState(false)
   const [bookmark, setBookmark] = useState('')
   const [open, setOpen] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [dragId, setDragId] = useState<string | null>(null)
+  const [over, setOver] = useState<string | null>(null)
+  const skipClick = useRef(false)
   const myTeams = new Set((teams.data ?? []).map((row) => row.teamId))
   const writableProjects = (projects.data ?? []).filter((row) => row.teamId && myTeams.has(row.teamId))
+  const dragged = (issues.data ?? []).find((row) => row._id === dragId) ?? null
+
+  function onTeam(issue: Issue) {
+    const teamId = (projects.data ?? []).find((item) => item._id === issue.projectId)?.teamId
+    return !!teamId && myTeams.has(teamId)
+  }
+
+  function canMove(issue: Issue, to: string) {
+    if (issue.status === to || !onTeam(issue)) return false
+    const ownWork = roles.has('gelistirici') && !roles.manage && !roles.has('tester')
+    if (ownWork && !owns(me, issue)) return false
+    return (moves[issue.status] ?? []).some((move) => move.to === to && roles.has(...move.roles))
+  }
 
   const rows = (issues.data ?? []).filter((row) => {
     if (projectId && row.projectId !== projectId) return false
@@ -64,7 +83,7 @@ export function Board({ go }: { go: (path: string) => void }) {
   })
 
   return (
-    <Page title="Pano" lede="Takım dışındaki kişiler issue'ları görür, değiştiremez. Atama yalnızca projenin takımına yapılır.">
+    <Page title="Pano" lede="Kartı izin verilen sütuna sürükleyerek durumunu değiştir. Takım dışındakiler kartı görecek, taşıyamayacak.">
       <div className="mb-4 flex flex-wrap items-end gap-3">
         <div className="w-56">
           <Field label="Arama">
@@ -73,7 +92,14 @@ export function Board({ go }: { go: (path: string) => void }) {
         </div>
         <div className="w-44">
           <Field label="Proje">
-            <Select value={projectId} onChange={(event) => setProjectId(event.target.value)}>
+            <Select
+              value={projectId}
+              onChange={(event) => {
+                const next = event.target.value
+                setProjectId(next)
+                window.history.replaceState(null, '', next ? `/?proje=${encodeURIComponent(next)}` : '/')
+              }}
+            >
               <option value="">Tümü</option>
               {(projects.data ?? []).map((row) => (
                 <option key={row._id} value={row._id}>
@@ -161,29 +187,74 @@ export function Board({ go }: { go: (path: string) => void }) {
       ) : null}
       {issues.isError ? <Banner>{errorText(issues.error)}</Banner> : null}
       <div className="grid gap-3 lg:grid-cols-5">
-        {columns.map((status) => {
-          const list = rows.filter((row) => row.status === status)
+        {columns.map((column) => {
+          const list = rows.filter((row) => row.status === column)
+          const accepts = dragged ? canMove(dragged, column) : false
           return (
-            <div key={status} className="rounded-2xl bg-stone-200/50 p-2">
+            <div
+              key={column}
+              onDragOver={(event) => {
+                if (!accepts) return
+                event.preventDefault()
+                event.dataTransfer.dropEffect = 'move'
+                setOver(column)
+              }}
+              onDrop={(event) => {
+                event.preventDefault()
+                const id = event.dataTransfer.getData('text/plain')
+                const issue = (issues.data ?? []).find((row) => row._id === id)
+                setDragId(null)
+                setOver(null)
+                if (!issue || !canMove(issue, column)) return
+                void write('desk.moveIssue', { id, status: column })
+                  .then(() => refresh('desk.listIssues'))
+                  .catch((cause: unknown) => setError(errorText(cause)))
+              }}
+              className={`rounded-2xl p-2 ${accepts && over === column ? 'bg-stone-300/80 ring-2 ring-stone-500' : 'bg-stone-200/50'}`}
+            >
               <div className="mb-2 flex items-center justify-between px-1">
-                <p className="text-xs font-medium uppercase tracking-wide text-stone-500">{statusLabel[status]}</p>
+                <p className="text-xs font-medium uppercase tracking-wide text-stone-500">{statusLabel[column]}</p>
                 <p className="text-xs text-stone-500">{list.length}</p>
               </div>
-              <div className="space-y-2">
-                {list.map((row) => (
-                  <button key={row._id} onClick={() => go(`/issue/${row._id}`)} className="block w-full rounded-xl bg-white p-3 text-left shadow-sm">
-                    <p className="text-xs text-stone-500">
-                      {row.projectKey}-{row.number}
-                    </p>
-                    <p className="mt-1 text-sm font-medium leading-5">{row.title}</p>
-                    <div className="mt-2 flex flex-wrap gap-1">
-                      <Pill tone={priorityTone(row.priority)}>{row.priorityLabel ?? row.priority}</Pill>
-                      {row.blocked ? <Pill tone="rose">Bloke</Pill> : null}
-                      {row.dueOn ? <Pill>{row.dueOn}</Pill> : null}
-                    </div>
-                    <p className="mt-2 text-xs text-stone-500">{row.assigneeName ?? 'Atanmamış'}</p>
-                  </button>
-                ))}
+              <div className="min-h-24 space-y-2">
+                {list.map((row) => {
+                  const movable = columns.some((target) => canMove(row, target))
+                  return (
+                    <button
+                      key={row._id}
+                      draggable={movable}
+                      onDragStart={(event) => {
+                        skipClick.current = true
+                        event.dataTransfer.setData('text/plain', row._id)
+                        event.dataTransfer.effectAllowed = 'move'
+                        setDragId(row._id)
+                      }}
+                      onDragEnd={() => {
+                        setDragId(null)
+                        setOver(null)
+                        setTimeout(() => {
+                          skipClick.current = false
+                        }, 0)
+                      }}
+                      onClick={() => {
+                        if (skipClick.current) return
+                        go(`/issue/${row._id}`)
+                      }}
+                      className={`block w-full rounded-xl bg-white p-3 text-left shadow-sm ${movable ? 'cursor-grab active:cursor-grabbing' : ''} ${dragId === row._id ? 'opacity-40' : ''}`}
+                    >
+                      <p className="text-xs text-stone-500">
+                        {row.projectKey}-{row.number}
+                      </p>
+                      <p className="mt-1 text-sm font-medium leading-5">{row.title}</p>
+                      <div className="mt-2 flex flex-wrap gap-1">
+                        <Pill tone={priorityTone(row.priority)}>{row.priorityLabel ?? row.priority}</Pill>
+                        {row.blocked ? <Pill tone="rose">Bloke</Pill> : null}
+                        {row.dueOn ? <Pill>{row.dueOn}</Pill> : null}
+                      </div>
+                      <p className="mt-2 text-xs text-stone-500">{row.assigneeName ?? 'Atanmamış'}</p>
+                    </button>
+                  )
+                })}
               </div>
             </div>
           )
@@ -294,7 +365,6 @@ export function IssuePage({ id, go }: { id: string; go: (path: string) => void }
   const comments = useRead<Comment>('desk.listComments', { issueId: id })
   const work = useRead<Worklog>('desk.listWorklogs', { issueId: id })
   const activity = useRead<Activity>('desk.listActivity', { issueId: id })
-  const members = useRead<Member>('desk.listProjectMembers', { projectId: issue.data?.[0]?.projectId ?? '' }, !!issue.data?.[0]?.projectId)
   const projects = useRead<Project>('desk.listProjects')
   const mine = useRead<MyTeam>('desk.listMyTeams')
   const sprints = useRead<Sprint>('desk.listSprints')
@@ -331,7 +401,7 @@ export function IssuePage({ id, go }: { id: string; go: (path: string) => void }
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <p className="text-xs uppercase tracking-wide text-stone-500">
-            {row.projectKey}-{row.number} · {row.kindLabel}
+            {row.projectKey}-{row.number} · {row.projectName} · {row.kindLabel}
           </p>
           <h1 className="mt-1 font-serif text-4xl">{row.title}</h1>
           <div className="mt-3 flex flex-wrap gap-2">
@@ -366,9 +436,11 @@ export function IssuePage({ id, go }: { id: string; go: (path: string) => void }
           {canEdit ? (
             <EditIssue
               row={row}
-              members={members.data ?? []}
-              sprints={(sprints.data ?? []).filter((sprint) => sprint.projectId === row.projectId)}
-              releases={(releases.data ?? []).filter((release) => release.projectId === row.projectId)}
+              projects={(projects.data ?? []).filter(
+                (item) => item._id === row.projectId || (!!item.teamId && (mine.data ?? []).some((team) => team.teamId === item.teamId)),
+              )}
+              sprints={sprints.data ?? []}
+              releases={releases.data ?? []}
               requesters={requesters.data ?? []}
               onSave={(params) =>
                 act(async () => {
@@ -400,6 +472,12 @@ export function IssuePage({ id, go }: { id: string; go: (path: string) => void }
         </div>
         <div className="space-y-4">
           <Card className="space-y-2 p-4 text-sm">
+            <p>
+              <span className="text-stone-500">Proje: </span>
+              <button className="underline" onClick={() => go(`/?proje=${row.projectId ?? ''}`)}>
+                {row.projectKey} · {row.projectName ?? '—'}
+              </button>
+            </p>
             <Line k="Raporlayan" v={row.reporterName} />
             <Line k="Atanan" v={row.assigneeName} />
             <Line k="Sprint" v={row.sprintName} />
@@ -463,20 +541,30 @@ function Line({ k, v }: { k: string; v: string | number | null | undefined }) {
 
 function EditIssue({
   row,
-  members,
+  projects,
   sprints,
   releases,
   requesters,
   onSave,
 }: {
   row: IssueDetail
-  members: Member[]
+  projects: Project[]
   sprints: Sprint[]
   releases: Release[]
   requesters: Requester[]
   onSave: (params: Record<string, unknown>) => Promise<void>
 }) {
   const [pending, setPending] = useState(false)
+  const [projectId, setProjectId] = useState(row.projectId ?? '')
+  const [assigneeId, setAssigneeId] = useState(row.assigneeId ?? '')
+  const [sprintId, setSprintId] = useState(row.sprintId ?? '')
+  const [releaseId, setReleaseId] = useState(row.releaseId ?? '')
+  const members = useRead<Member>('desk.listProjectMembers', { projectId }, !!projectId)
+  const moving = projectId !== (row.projectId ?? '')
+  useEffect(() => {
+    if (!members.isSuccess || !assigneeId) return
+    if (!(members.data ?? []).some((member) => member.userId === assigneeId)) setAssigneeId('')
+  }, [assigneeId, members.data, members.isSuccess])
   async function submit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault()
     const data = new FormData(event.currentTarget)
@@ -485,13 +573,14 @@ function EditIssue({
     const hours = blank(String(data.get('estimateHours') ?? ''))
     await onSave({
       id: row._id,
+      projectId,
       title: data.get('title'),
       priority: data.get('priority'),
       kind: data.get('kind'),
-      assigneeId: blank(String(data.get('assignee') ?? '')),
-      sprintId: blank(String(data.get('sprint') ?? '')),
+      assigneeId: blank(assigneeId),
+      sprintId: moving ? null : blank(sprintId),
       requesterId: blank(String(data.get('requester') ?? '')),
-      releaseId: blank(String(data.get('fixRelease') ?? '')),
+      releaseId: moving ? null : blank(releaseId),
       dueOn: blank(String(data.get('dueOn') ?? '')),
       storyPoints: points ? Number(points) : null,
       estimateHours: hours ? Number(hours) : null,
@@ -509,6 +598,30 @@ function EditIssue({
             <TextInput name="title" defaultValue={row.title} required />
           </Field>
         </div>
+        <Field label="Proje">
+          <Select
+            value={projectId}
+            onChange={(event) => {
+              const next = event.target.value
+              setProjectId(next)
+              if (next !== row.projectId) {
+                setSprintId('')
+                setReleaseId('')
+              }
+            }}
+          >
+            {projects.map((item) => (
+              <option key={item._id} value={item._id}>
+                {item.key} · {item.name}
+              </option>
+            ))}
+          </Select>
+        </Field>
+        {moving ? (
+          <p className="text-xs leading-5 text-stone-500 md:col-span-2">
+            Proje değişince numara yenilenir. Sprint ve yayın boşalır. Atanan kişi yeni projenin takımında olmalıdır.
+          </p>
+        ) : null}
         <Field label="Öncelik">
           <Select name="priority" defaultValue={row.priority}>
             {priorities.map(([value, label]) => (
@@ -524,17 +637,17 @@ function EditIssue({
           </Select>
         </Field>
         <Field label="Atanan">
-          <Select name="assignee" defaultValue={row.assigneeId ?? ''}>
+          <Select value={assigneeId} onChange={(event) => setAssigneeId(event.target.value)}>
             <option value="">Yok</option>
-            {members.map((member) => (
+            {(members.data ?? []).map((member) => (
               <option key={member.userId} value={member.userId}>{member.name ?? member.username}</option>
             ))}
           </Select>
         </Field>
         <Field label="Sprint">
-          <Select name="sprint" defaultValue={row.sprintId ?? ''}>
+          <Select value={sprintId} onChange={(event) => setSprintId(event.target.value)} disabled={moving}>
             <option value="">Yok</option>
-            {sprints.map((sprint) => (
+            {sprints.filter((sprint) => sprint.projectId === projectId).map((sprint) => (
               <option key={sprint._id} value={sprint._id}>{sprint.name}</option>
             ))}
           </Select>
@@ -548,9 +661,9 @@ function EditIssue({
           </Select>
         </Field>
         <Field label="Yayın">
-          <Select name="fixRelease" defaultValue={row.releaseId ?? ''}>
+          <Select value={releaseId} onChange={(event) => setReleaseId(event.target.value)} disabled={moving}>
             <option value="">Yok</option>
-            {releases.map((release) => (
+            {releases.filter((release) => release.projectId === projectId).map((release) => (
               <option key={release._id} value={release._id}>{release.name}</option>
             ))}
           </Select>
@@ -676,29 +789,49 @@ function Work({
   )
 }
 
-export function Projects() {
+export function Projects({ go }: { go: (path: string) => void }) {
   const projects = useRead<Project>('desk.listProjects')
+  const issues = useRead<Issue>('desk.listIssues')
   const users = useRead<UserRow>('desk.listUsers')
   const teams = useRead<TeamRow>('desk.listTeams')
   const roles = useRoles()
   const refresh = useRefresh()
   const [error, setError] = useState<string | null>(null)
   return (
-    <Page title="Projeler" lede="Anahtar bir kez yazılır. Açık issue sayısı, bitmemiş işlerden gelir.">
+    <Page title="Projeler" lede="Bir projenin issue'ları burada listelenir. Panoda aynı proje seçilerek süzülür.">
       {error ? <div className="mb-4"><Banner>{error}</Banner></div> : null}
       <div className="grid gap-3 md:grid-cols-2">
-        {(projects.data ?? []).map((row) => (
-          <Card key={row._id} className="p-4">
-            <p className="text-xs text-stone-500">{row.key}</p>
-            <h2 className="font-serif text-2xl">{row.name}</h2>
-            <p className="mt-2 text-sm text-stone-500">
-              {row.openCount} açık · lider {row.leadName ?? '—'} · {row.teamName ?? 'takım yok'}
-            </p>
-            <p className="mt-1 text-xs text-stone-500">
-              {row.language ?? '—'} · standup {row.standupAt?.slice(0, 5) ?? '—'} · {row.startsOn ?? '—'}
-            </p>
-          </Card>
-        ))}
+        {(projects.data ?? []).map((row) => {
+          const list = (issues.data ?? []).filter((issue) => issue.projectId === row._id)
+          return (
+            <Card key={row._id} className="p-4">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <p className="text-xs text-stone-500">{row.key}</p>
+                  <h2 className="font-serif text-2xl">{row.name}</h2>
+                </div>
+                <Button tone="ghost" onClick={() => go(`/?proje=${row._id}`)}>Panoda aç</Button>
+              </div>
+              <p className="mt-2 text-sm text-stone-500">
+                {row.openCount} açık · lider {row.leadName ?? '—'} · {row.teamName ?? 'takım yok'}
+              </p>
+              <p className="mt-1 text-xs text-stone-500">
+                {row.language ?? '—'} · standup {row.standupAt?.slice(0, 5) ?? '—'} · {row.startsOn ?? '—'}
+              </p>
+              <ul className="mt-3 space-y-1 border-t border-line pt-3">
+                {list.length === 0 ? <li className="text-sm text-stone-500">Issue yok.</li> : null}
+                {list.map((issue) => (
+                  <li key={issue._id}>
+                    <button className="text-left text-sm underline" onClick={() => go(`/issue/${issue._id}`)}>
+                      {issue.projectKey}-{issue.number} · {issue.title}
+                    </button>
+                    <span className="ml-2 text-xs text-stone-500">{statusLabel[issue.status] ?? issue.status}</span>
+                  </li>
+                ))}
+              </ul>
+            </Card>
+          )
+        })}
       </div>
       {roles.manage ? (
         <form
@@ -743,6 +876,225 @@ export function Projects() {
           <Field label="Dil"><TextInput name="language" placeholder="tr" /></Field>
           <Field label="Standup"><TextInput name="standupAt" type="time" /></Field>
           <Button type="submit">Projeyi aç</Button>
+        </form>
+      ) : null}
+    </Page>
+  )
+}
+
+export function Teams() {
+  const teams = useRead<AuthTeam>('auth.listTeams')
+  const users = useRead<UserRow>('desk.listUsers')
+  const mine = useRead<MyTeam>('desk.listMyTeams')
+  const roles = useRoles()
+  const refresh = useRefresh()
+  const [teamId, setTeamId] = useState('')
+  const [error, setError] = useState<string | null>(null)
+  const rows = teams.data ?? []
+  const selected = teamId || rows[0]?._id || ''
+  const memberships = useRead<TeamMembership>('auth.listTeamMemberships', { teamId: selected }, !!selected)
+  const leadTeams = new Set((mine.data ?? []).filter((row) => row.kind === 'lead').map((row) => row.teamId))
+  const canRoster = roles.govern || leadTeams.has(selected)
+  const projects = useRead<Project>('desk.listProjects')
+  const names = new Map(rows.map((row) => [row._id, row.name]))
+  const current = rows.find((row) => row._id === selected)
+  const taken = new Set((memberships.data ?? []).map((row) => row.userId))
+
+  function reload() {
+    return refresh('auth.listTeams', 'auth.listTeamMemberships', 'desk.listTeams', 'desk.listMyTeams', 'desk.listProjects')
+  }
+
+  return (
+    <Page title="Takımlar" lede="Yönetici takımı açar, adlandırır ve lider atar. Takım lideri üye ekler ve çıkarır.">
+      {error ? <div className="mb-4"><Banner>{error}</Banner></div> : null}
+      {teams.isError ? <Banner>{errorText(teams.error)}</Banner> : null}
+      <div className="grid gap-4 lg:grid-cols-[240px_1fr]">
+        <div className="space-y-2">
+          {rows.map((row) => (
+            <button
+              key={row._id}
+              onClick={() => setTeamId(row._id)}
+              className={`block w-full rounded-xl px-3 py-2 text-left text-sm ${row._id === selected ? 'bg-ink text-white' : 'bg-white'}`}
+            >
+              <span className="block font-medium">{row.name}</span>
+              <span className={`block text-xs ${row._id === selected ? 'text-stone-300' : 'text-stone-500'}`}>
+                {row.parent ? names.get(row.parent) ?? 'Üst takım' : 'Kök takım'}
+              </span>
+            </button>
+          ))}
+          {rows.length === 0 ? <p className="text-sm text-stone-500">Takım yok.</p> : null}
+        </div>
+        {current ? (
+          <Card className="space-y-4 p-4">
+            <div>
+              <h2 className="font-serif text-3xl">{current.name}</h2>
+              <p className="text-sm text-stone-500">{current.parent ? `Üst takım: ${names.get(current.parent)}` : 'Kök takım'}</p>
+            </div>
+            {roles.govern ? (
+              <form
+                className="flex flex-wrap items-end gap-2"
+                onSubmit={(event) => {
+                  event.preventDefault()
+                  const name = String(new FormData(event.currentTarget).get('name') ?? '').trim()
+                  if (!name) return
+                  void write('auth.renameTeam', { teamId: current._id, name })
+                    .then(() => reload())
+                    .catch((cause: unknown) => setError(errorText(cause)))
+                }}
+              >
+                <Field label="Ad">
+                  <TextInput name="name" key={current._id} defaultValue={current.name} required />
+                </Field>
+                <Button type="submit" tone="ghost">Adı kaydet</Button>
+              </form>
+            ) : null}
+            <ul className="space-y-2">
+              {(memberships.data ?? []).map((row) => (
+                <li key={row._id} className="flex flex-wrap items-center justify-between gap-2 text-sm">
+                  <span>
+                    {row.name ?? row.username} · {row.kind === 'lead' ? 'Lider' : 'Üye'}
+                  </span>
+                  <span className="flex gap-2">
+                    {roles.govern ? (
+                      <Button
+                        tone="ghost"
+                        onClick={() =>
+                          void write('desk.setTeamMemberKind', { membershipId: row._id, kind: row.kind === 'lead' ? 'member' : 'lead' })
+                            .then(() => reload())
+                            .catch((cause: unknown) => setError(errorText(cause)))
+                        }
+                      >
+                        {row.kind === 'lead' ? 'Üye yap' : 'Lider yap'}
+                      </Button>
+                    ) : null}
+                    {canRoster && (roles.govern || row.kind !== 'lead') ? (
+                      <Button
+                        tone="danger"
+                        onClick={() =>
+                          void write('auth.removeTeamMember', { membershipId: row._id })
+                            .then(() => reload())
+                            .catch((cause: unknown) => setError(errorText(cause)))
+                        }
+                      >
+                        Çıkar
+                      </Button>
+                    ) : null}
+                  </span>
+                </li>
+              ))}
+              {(memberships.data ?? []).length === 0 ? <li className="text-sm text-stone-500">Üye yok.</li> : null}
+            </ul>
+            {canRoster ? (
+              <form
+                className="flex flex-wrap items-end gap-2"
+                onSubmit={(event) => {
+                  event.preventDefault()
+                  const data = new FormData(event.currentTarget)
+                  const userId = String(data.get('user') ?? '')
+                  const kind = String(data.get('kind') ?? 'member')
+                  const action = kind === 'lead'
+                    ? write('desk.addTeamLead', { teamId: current._id, userId })
+                    : write('auth.addTeamMembers', { teamId: current._id, kind: 'member', users: [{ userId }] })
+                  void action
+                    .then(() => reload())
+                    .then(() => event.currentTarget.reset())
+                    .catch((cause: unknown) => setError(errorText(cause)))
+                }}
+              >
+                <Field label="Üye">
+                  <Select name="user" required>
+                    <option value="">Seç</option>
+                    {(users.data ?? []).filter((user) => !taken.has(user._id)).map((user) => (
+                      <option key={user._id} value={user._id}>{user.name ?? user.username}</option>
+                    ))}
+                  </Select>
+                </Field>
+                {roles.govern ? (
+                  <Field label="Tür">
+                    <Select name="kind" defaultValue="member">
+                      <option value="member">Üye</option>
+                      <option value="lead">Lider</option>
+                    </Select>
+                  </Field>
+                ) : null}
+                <Button type="submit">Ekle</Button>
+              </form>
+            ) : (
+              <p className="text-sm text-stone-500">Bu kadroyu yalnızca takımın lideri veya yönetici değiştirir.</p>
+            )}
+            {roles.govern ? (
+              <div className="flex flex-wrap gap-2 border-t border-line pt-4">
+                <form
+                  className="flex flex-wrap items-end gap-2"
+                  onSubmit={(event) => {
+                    event.preventDefault()
+                    const parent = blank(String(new FormData(event.currentTarget).get('parent') ?? ''))
+                    void write('auth.moveTeam', { teamId: current._id, parent })
+                      .then(() => reload())
+                      .catch((cause: unknown) => setError(errorText(cause)))
+                  }}
+                >
+                  <Field label="Üst takım">
+                    <Select name="parent" key={current.parent ?? 'root'} defaultValue={current.parent ?? ''}>
+                      <option value="">Kök</option>
+                      {rows.filter((row) => row._id !== current._id).map((row) => (
+                        <option key={row._id} value={row._id}>{row.name}</option>
+                      ))}
+                    </Select>
+                  </Field>
+                  <Button type="submit" tone="ghost">Taşı</Button>
+                </form>
+                {(projects.data ?? []).some((item) => item.teamId === current._id) ? (
+                  <p className="self-end text-xs text-stone-500">Bu takıma bağlı proje varken silinmez.</p>
+                ) : (
+                  <Button
+                    tone="danger"
+                    onClick={() =>
+                      void write('auth.deleteTeam', { teamId: current._id })
+                        .then(() => {
+                          setTeamId('')
+                          return reload()
+                        })
+                        .catch((cause: unknown) => setError(errorText(cause)))
+                    }
+                  >
+                    Takımı sil
+                  </Button>
+                )}
+              </div>
+            ) : null}
+          </Card>
+        ) : null}
+      </div>
+      {roles.govern ? (
+        <form
+          className="mt-6 grid max-w-xl gap-3"
+          onSubmit={(event) => {
+            event.preventDefault()
+            const form = event.currentTarget
+            const data = new FormData(form)
+            void write('auth.addTeam', {
+              name: String(data.get('name') ?? '').trim(),
+              parent: blank(String(data.get('parent') ?? '')),
+              leadScope: 'team',
+              managedBy: 'local',
+            })
+              .then(() => reload())
+              .then(() => form.reset())
+              .catch((cause: unknown) => setError(errorText(cause)))
+          }}
+        >
+          <h2 className="font-medium">Yeni takım</h2>
+          <Field label="Ad"><TextInput name="name" required /></Field>
+          <Field label="Üst takım">
+            <Select name="parent">
+              <option value="">Kök</option>
+              {rows.map((row) => (
+                <option key={row._id} value={row._id}>{row.name}</option>
+              ))}
+            </Select>
+          </Field>
+          <Button type="submit">Takımı aç</Button>
         </form>
       ) : null}
     </Page>
