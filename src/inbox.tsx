@@ -11,11 +11,12 @@ export function InboxPage() {
     ...(inbox.data?.list.assignments ?? []),
     ...(inbox.data?.list.notifications ?? []),
     ...(inbox.data?.list.alerts ?? []),
+    ...(inbox.data?.list.mentions ?? []),
   ]
   const waiting = inbox.data?.list.interactions ?? []
 
   return (
-    <Page title="Gelen" lede="Atamalar, uyarılar ve onay bekleyen kritik issue'lar.">
+    <Page title="Gelen" lede="Atamalar, anmalar, uyarılar ve onay bekleyen kritik issue'lar.">
       {error ? <div className="mb-4"><Banner>{error}</Banner></div> : null}
       {waiting.length > 0 ? (
         <div className="mb-4 space-y-3">

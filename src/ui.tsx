@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react'
+import { forwardRef, type ReactNode } from 'react'
 
 export function Page({ title, lede, children }: { title: string; lede?: string; children?: ReactNode }) {
   return (
@@ -46,9 +46,9 @@ export function TextInput(props: React.InputHTMLAttributes<HTMLInputElement>) {
   return <input {...props} className={`${control} ${props.className ?? ''}`} />
 }
 
-export function Area(props: React.TextareaHTMLAttributes<HTMLTextAreaElement>) {
-  return <textarea {...props} className={`${control} min-h-24 ${props.className ?? ''}`} />
-}
+export const Area = forwardRef<HTMLTextAreaElement, React.TextareaHTMLAttributes<HTMLTextAreaElement>>(function Area(props, ref) {
+  return <textarea ref={ref} {...props} className={`${control} min-h-24 ${props.className ?? ''}`} />
+})
 
 export function Select(props: React.SelectHTMLAttributes<HTMLSelectElement>) {
   return <select {...props} className={control} />

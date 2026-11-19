@@ -135,11 +135,9 @@ export type Member = { _id: string; userId: string; username: string; name: stri
 export type SavedSearch = {
   _id: string
   name: string
-  term: string | null
-  status: string | null
-  onlyMine: boolean
-  projectId: string | null
-  projectKey: string | null
+  description: string | null
+  query: string
+  state: string | null
 }
 export type Sprint = {
   _id: string
@@ -162,12 +160,22 @@ export type Requester = {
 export type Comment = {
   _id: string
   body: { body?: string | null } | string | null
-  internal: boolean
+  authorId: string | null
   authorName: string | null
+  parentId: string | null
+  resolvedAt: string | null
+  resolverName: string | null
   _createdAt: string
 }
 export type Worklog = { _id: string; minutes: number; note: string | null; spentOn: string | null; authorName: string | null }
-export type Activity = { _id: string; summary: string | null; event: string | null; at: string | null; _createdAt?: string }
+export type IssueVersion = {
+  _versionId: string
+  _startAt: string
+  _endAt: string | null
+  title: string | null
+  status: string | null
+  editor: string | null
+}
 export type Release = { _id: string; name: string; shipMonth: string | null; shipped: boolean; projectId: string | null; projectKey: string | null }
 export type Sla = { _id: string; priority: string; priorityLabel: string | null; responseHours: number }
 export type Me = { _id: string; username: string; name: string | null }

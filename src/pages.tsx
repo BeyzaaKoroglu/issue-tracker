@@ -10,7 +10,7 @@ import {
   sprintLabel,
   sprintMoves,
   statusLabel,
-  type Activity,
+  type IssueVersion,
   type Comment,
   type AuthTeam,
   type Issue,
@@ -32,6 +32,32 @@ import { owns, useMe, useRoles } from './session'
 import { errorText, write } from './wyndbase'
 import { Area, Banner, Button, Card, Empty, Field, Page, Pill, Select, TextInput } from './ui'
 
+function searchAlert(filters: { term: string; status: string; onlyMine: boolean; projectId: string }) {
+  const checks: string[] = []
+  if ((columns as readonly string[]).includes(filters.status)) checks.push(`status == '${filters.status}'`)
+  if (/^[0-9a-f-]{36}$/i.test(filters.projectId)) checks.push(`project == '${filters.projectId}'`)
+  if (filters.onlyMine) checks.push('assignee == $context.userId')
+  const term = filters.term.trim().replaceAll("'", "''")
+  if (term) checks.push(`SEARCH '${term}'`)
+  const where = checks.length > 0 ? ` FILTER ${checks.join(' AND ')}` : ''
+  return `SELECT desk.issues { _id, title, number, status }${where}`
+}
+
+function savedFilters(description: string | null) {
+  if (!description) return null
+  try {
+    const value = JSON.parse(description) as { term?: unknown; status?: unknown; onlyMine?: unknown; projectId?: unknown }
+    return {
+      term: typeof value.term === 'string' ? value.term : '',
+      status: typeof value.status === 'string' ? value.status : '',
+      onlyMine: value.onlyMine === true,
+      projectId: typeof value.projectId === 'string' ? value.projectId : '',
+    }
+  } catch {
+    return null
+  }
+}
+
 function useMeId() {
   const me = useMe()
   return me.data as Me | undefined
@@ -41,7 +67,7 @@ export function Board({ go, initialProjectId = '' }: { go: (path: string) => voi
   const issues = useRead<Issue>('desk.listIssues')
   const projects = useRead<Project>('desk.listProjects')
   const teams = useRead<MyTeam>('desk.listMyTeams')
-  const saved = useRead<SavedSearch>('desk.listMySearches')
+  const saved = useRead<SavedSearch>('system.listMyAlerts')
   const roles = useRoles()
   const me = useMeId()
   const refresh = useRefresh()
@@ -135,14 +161,18 @@ export function Board({ go, initialProjectId = '' }: { go: (path: string) => voi
           tone="ghost"
           disabled={!bookmark.trim()}
           onClick={() =>
-            void write('desk.saveSearch', {
+            void write('system.createAlert', {
               name: bookmark.trim(),
-              term: blank(term),
-              status: blank(status),
-              onlyMine: mine,
-              projectId: blank(projectId),
+              query: searchAlert({ term, status, onlyMine: mine, projectId }),
+              description: JSON.stringify({
+                term: blank(term),
+                status: blank(status),
+                onlyMine: mine,
+                projectId: blank(projectId),
+              }),
+              notifyOnResolve: false,
             })
-              .then(() => refresh('desk.listMySearches'))
+              .then(() => refresh('system.listMyAlerts'))
               .then(() => setBookmark(''))
               .catch((cause: unknown) => setError(errorText(cause)))
           }
@@ -153,17 +183,19 @@ export function Board({ go, initialProjectId = '' }: { go: (path: string) => voi
           <span key={row._id} className="inline-flex items-center gap-1 rounded-full bg-white px-2 py-1 text-sm">
             <button
               onClick={() => {
-                setTerm(row.term ?? '')
-                setStatus(row.status ?? '')
-                setMine(row.onlyMine)
-                setProjectId(row.projectId ?? '')
+                const filters = savedFilters(row.description)
+                if (!filters) return
+                setTerm(filters.term)
+                setStatus(filters.status)
+                setMine(filters.onlyMine)
+                setProjectId(filters.projectId)
               }}
             >
               {row.name}
             </button>
             <button
               className="text-stone-400"
-              onClick={() => void write('desk.deleteSearch', { id: row._id }).then(() => refresh('desk.listMySearches'))}
+              onClick={() => void write('system.deleteAlert', { alertId: row._id }).then(() => refresh('system.listMyAlerts'))}
             >
               ×
             </button>
@@ -364,7 +396,7 @@ export function IssuePage({ id, go }: { id: string; go: (path: string) => void }
   const issue = useRead<IssueDetail>('desk.getIssue', { id })
   const comments = useRead<Comment>('desk.listComments', { issueId: id })
   const work = useRead<Worklog>('desk.listWorklogs', { issueId: id })
-  const activity = useRead<Activity>('desk.listActivity', { issueId: id })
+  const history = useRead<IssueVersion>('desk.listIssueHistory', { issueId: id })
   const projects = useRead<Project>('desk.listProjects')
   const mine = useRead<MyTeam>('desk.listMyTeams')
   const sprints = useRead<Sprint>('desk.listSprints')
@@ -415,7 +447,7 @@ export function IssuePage({ id, go }: { id: string; go: (path: string) => void }
             <Button
               key={move.to}
               tone="ghost"
-              onClick={() => void act(() => write('desk.moveIssue', { id, status: move.to }), ['desk.getIssue', 'desk.listIssues', 'desk.listActivity'])}
+              onClick={() => void act(() => write('desk.moveIssue', { id, status: move.to }), ['desk.getIssue', 'desk.listIssues', 'desk.listIssueHistory'])}
             >
               {move.label}
             </Button>
@@ -447,20 +479,34 @@ export function IssuePage({ id, go }: { id: string; go: (path: string) => void }
                   const { description, ...rest } = params
                   await write('desk.updateIssue', rest)
                   await write('desk.updateIssueBody', { id: row._id, body: { body: String(description ?? ''), attachments: [] } })
-                }, ['desk.getIssue', 'desk.listIssues'])
+                }, ['desk.getIssue', 'desk.listIssues', 'desk.listIssueHistory'])
               }
             />
           ) : null}
           <Comments
-            rows={(comments.data ?? []).filter((item) => roles.seeInternal || !item.internal)}
-            canWrite={onTeam && roles.write}
-            canInternal={roles.seeInternal}
-            onAdd={(body, internal) =>
-              act(
-                () => write('desk.createComment', { issueId: id, body: { body, attachments: [] }, internal }),
-                ['desk.listComments'],
-              )
-            }
+            rows={comments.data ?? []}
+            me={me?._id ?? null}
+            onAdd={async (body, parentId) => {
+              await write('desk.createComment', {
+                issueId: id,
+                parentId,
+                body: { body, attachments: [] },
+                target: { _id: id, _ref: '01a1f357-9bd6-746c-acfd-595a5c3728b0' },
+              })
+              await refresh('desk.listComments')
+            }}
+            onEdit={async (commentId, body) => {
+              await write('desk.editComment', { id: commentId, body: { body, attachments: [] } })
+              await refresh('desk.listComments')
+            }}
+            onResolve={async (commentId, resolved) => {
+              await write('desk.resolveComment', { id: commentId, resolved })
+              await refresh('desk.listComments')
+            }}
+            onDelete={async (commentId) => {
+              await write('desk.deleteComment', { id: commentId })
+              await refresh('desk.listComments')
+            }}
           />
           <Work
             rows={work.data ?? []}
@@ -485,7 +531,7 @@ export function IssuePage({ id, go }: { id: string; go: (path: string) => void }
                 projectId={row.projectId}
                 assigneeId={row.assigneeId}
                 onSave={(assigneeId) =>
-                  act(() => write('desk.assignIssue', { id: row._id, assigneeId }), ['desk.getIssue', 'desk.listIssues', 'desk.listActivity'])
+                  act(() => write('desk.assignIssue', { id: row._id, assigneeId }), ['desk.getIssue', 'desk.listIssues', 'desk.listIssueHistory'])
                 }
               />
             ) : null}
@@ -500,34 +546,17 @@ export function IssuePage({ id, go }: { id: string; go: (path: string) => void }
             <Line k="Etiket" v={(row.labelNames ?? []).join(', ')} />
             <Line k="İzleyen" v={(row.watcherNames ?? []).join(', ')} />
           </Card>
-          {canEdit && row.assigneeId ? (
-            <Button
-              tone="ghost"
-              onClick={() =>
-                void act(
-                  () =>
-                    write('desk.notifyIssue', {
-                      recipientId: row.assigneeId,
-                      title: `${row.projectKey}-${row.number} sana atandı`,
-                      body: row.title,
-                      issueId: row._id,
-                    }),
-                  [],
-                )
-              }
-            >
-              Atanana mektup ve bildirim
-            </Button>
-          ) : null}
           <Card>
-            <h2 className="px-4 pt-4 text-sm font-medium">Hareket</h2>
-            {(activity.data ?? []).length === 0 ? (
+            <h2 className="px-4 pt-4 text-sm font-medium">Geçmiş</h2>
+            {(history.data ?? []).length === 0 ? (
               <Empty>Kayıt yok.</Empty>
             ) : (
               <ul className="space-y-2 px-4 py-3 text-sm">
-                {(activity.data ?? []).map((item) => (
-                  <li key={item._id}>
-                    <span className="text-stone-500">{(item.at ?? item._createdAt ?? '').slice(0, 16).replace('T', ' ')}</span> {item.event} · {item.summary}
+                {(history.data ?? []).map((item) => (
+                  <li key={item._versionId}>
+                    <span className="text-stone-500">{item._startAt.slice(0, 16).replace('T', ' ')}</span>
+                    {' '}{item.editor ?? '—'} · {item.status ? (statusLabel[item.status] ?? item.status) : '—'} · {item.title}
+                    {item._endAt ? '' : ' · güncel'}
                   </li>
                 ))}
               </ul>
@@ -739,59 +768,235 @@ function EditIssue({
   )
 }
 
+function CommentBody({ text }: { text: string }) {
+  const parts = text.split(/@\[([^\]]*)\]\(user:[0-9a-f-]{36}\)/i)
+  return (
+    <p className="whitespace-pre-wrap">
+      {parts.map((part, index) =>
+        index % 2 === 1 ? (
+          <span key={index} className="rounded bg-amber-100 px-1 text-amber-950">@{part}</span>
+        ) : (
+          <span key={index}>{part}</span>
+        ),
+      )}
+    </p>
+  )
+}
+
+function mentionQuery(value: string, cursor: number) {
+  const before = value.slice(0, cursor)
+  const at = before.lastIndexOf('@')
+  if (at < 0) return null
+  const previous = at > 0 ? before[at - 1] : ''
+  if (previous && !/\s/.test(previous)) return null
+  const fragment = before.slice(at + 1)
+  if (/\s/.test(fragment)) return null
+  return { at, fragment }
+}
+
+function thread(rows: Comment[]) {
+  const byParent = new Map<string, Comment[]>()
+  const roots: Comment[] = []
+  for (const row of rows) {
+    if (!row.parentId || !rows.some((item) => item._id === row.parentId)) {
+      roots.push(row)
+      continue
+    }
+    const list = byParent.get(row.parentId) ?? []
+    list.push(row)
+    byParent.set(row.parentId, list)
+  }
+  return { roots, byParent }
+}
+
 function Comments({
   rows,
-  canWrite,
-  canInternal,
+  me,
   onAdd,
+  onEdit,
+  onResolve,
+  onDelete,
 }: {
   rows: Comment[]
-  canWrite: boolean
-  canInternal: boolean
-  onAdd: (body: string, internal: boolean) => Promise<void>
+  me: string | null
+  onAdd: (body: string, parentId: string | null) => Promise<void>
+  onEdit: (id: string, body: string) => Promise<void>
+  onResolve: (id: string, resolved: boolean) => Promise<void>
+  onDelete: (id: string) => Promise<void>
 }) {
-  const [pending, setPending] = useState(false)
+  const [mode, setMode] = useState<{ kind: 'new' } | { kind: 'reply' | 'edit'; id: string }>({ kind: 'new' })
+  const [busy, setBusy] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const { roots, byParent } = thread(rows)
+  const target = mode.kind === 'new' ? null : rows.find((item) => item._id === mode.id) ?? null
+
+  async function run(key: string, work: () => Promise<void>) {
+    setBusy(key)
+    setError(null)
+    try {
+      await work()
+    } catch (cause) {
+      setError(errorText(cause))
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  function render(row: Comment, nested: boolean) {
+    return (
+      <li key={row._id} className={nested ? 'mt-3 border-l border-line pl-3' : ''}>
+        <p className="text-xs text-stone-500">
+          {row.authorName} · {row._createdAt.slice(0, 16).replace('T', ' ')}
+          {row.resolvedAt ? ` · çözüldü${row.resolverName ? ` · ${row.resolverName}` : ''}` : ''}
+        </p>
+        <CommentBody text={note(row.body)} />
+        <div className="mt-1 flex flex-wrap gap-2 text-xs">
+          <button type="button" className="text-stone-600 hover:text-ink" onClick={() => setMode({ kind: 'reply', id: row._id })}>Yanıtla</button>
+          <button
+            type="button"
+            className="text-stone-600 hover:text-ink"
+            disabled={busy === row._id}
+            onClick={() => void run(row._id, () => onResolve(row._id, !row.resolvedAt))}
+          >
+            {row.resolvedAt ? 'Yeniden aç' : 'Çöz'}
+          </button>
+          {row.authorId === me ? (
+            <button type="button" className="text-stone-600 hover:text-ink" onClick={() => setMode({ kind: 'edit', id: row._id })}>Düzenle</button>
+          ) : null}
+          <button
+            type="button"
+            className="text-stone-600 hover:text-ink"
+            disabled={busy === row._id}
+            onClick={() => void run(row._id, () => onDelete(row._id))}
+          >
+            Sil
+          </button>
+        </div>
+        {(byParent.get(row._id) ?? []).length > 0 ? (
+          <ul>{(byParent.get(row._id) ?? []).map((child) => render(child, true))}</ul>
+        ) : null}
+      </li>
+    )
+  }
+
   return (
     <Card>
       <h2 className="px-4 pt-4 text-sm font-medium">Yorumlar</h2>
-      {rows.length === 0 ? <Empty>Yorum yok.</Empty> : (
-        <ul className="space-y-3 px-4 py-3">
-          {rows.map((row) => (
-            <li key={row._id} className="text-sm">
-              <p className="text-xs text-stone-500">
-                {row.authorName} · {row._createdAt.slice(0, 16).replace('T', ' ')}
-                {row.internal ? ' · iç not' : ''}
-              </p>
-              <p className="whitespace-pre-wrap">{note(row.body)}</p>
+      {roots.length === 0 ? <Empty>Yorum yok.</Empty> : <ul className="space-y-3 px-4 py-3 text-sm">{roots.map((row) => render(row, false))}</ul>}
+      {error ? <div className="px-4"><Banner>{error}</Banner></div> : null}
+      <CommentComposer
+        key={mode.kind === 'new' ? 'new' : `${mode.kind}:${mode.id}`}
+        placeholder={mode.kind === 'edit' ? 'Yorumu düzenle. Birini anmak için @ yaz.' : 'Yorum yaz. Birini anmak için @ yaz.'}
+        submitLabel={mode.kind === 'edit' ? 'Kaydet' : mode.kind === 'reply' ? 'Yanıtla' : 'Yorum yaz'}
+        initial={mode.kind === 'edit' && target ? note(target.body) : ''}
+        hint={
+          mode.kind === 'reply' && target ? `${target.authorName ?? 'yoruma'} yanıt` :
+          mode.kind === 'edit' ? 'Kendi yorumun' : null
+        }
+        onCancel={mode.kind === 'new' ? null : () => setMode({ kind: 'new' })}
+        onSubmit={async (body) => {
+          if (mode.kind === 'edit' && target) await onEdit(target._id, body)
+          else if (mode.kind === 'reply' && target) await onAdd(body, target._id)
+          else await onAdd(body, null)
+          setMode({ kind: 'new' })
+        }}
+      />
+    </Card>
+  )
+}
+
+function CommentComposer({
+  placeholder,
+  submitLabel,
+  initial,
+  hint,
+  onCancel,
+  onSubmit,
+}: {
+  placeholder: string
+  submitLabel: string
+  initial: string
+  hint: string | null
+  onCancel: (() => void) | null
+  onSubmit: (body: string) => Promise<void>
+}) {
+  const box = useRef<HTMLTextAreaElement>(null)
+  const [text, setText] = useState(initial)
+  const [cursor, setCursor] = useState(initial.length)
+  const [pending, setPending] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const query = mentionQuery(text, cursor)
+  const people = useRead<UserRow>('auth.searchUsers', { search: query?.fragment ?? '', limit: 8 }, query !== null)
+
+  function place(next: string, caret: number) {
+    setText(next)
+    setCursor(caret)
+    requestAnimationFrame(() => {
+      const field = box.current
+      if (!field) return
+      field.focus()
+      field.setSelectionRange(caret, caret)
+    })
+  }
+
+  function pick(person: UserRow) {
+    if (!query) return
+    const label = (person.name || person.username).replace(/[[\]]/g, '')
+    const token = `@[${label}](user:${person._id}) `
+    const next = text.slice(0, query.at) + token + text.slice(cursor)
+    place(next, query.at + token.length)
+  }
+
+  return (
+    <form
+      className="space-y-2 border-t border-line p-4"
+      onSubmit={(event) => {
+        event.preventDefault()
+        const body = text.trim()
+        if (!body) return
+        setPending(true)
+        setError(null)
+        void onSubmit(body)
+          .then(() => {
+            setText('')
+            setCursor(0)
+          })
+          .catch((cause: unknown) => setError(errorText(cause)))
+          .finally(() => setPending(false))
+      }}
+    >
+      {hint ? <p className="text-xs text-stone-500">{hint}</p> : null}
+      <Area
+        ref={box}
+        value={text}
+        placeholder={placeholder}
+        required
+        onChange={(event) => {
+          setText(event.target.value)
+          setCursor(event.target.selectionStart ?? event.target.value.length)
+        }}
+        onClick={(event) => setCursor(event.currentTarget.selectionStart ?? 0)}
+        onKeyUp={(event) => setCursor(event.currentTarget.selectionStart ?? 0)}
+      />
+      {query ? (
+        <ul className="overflow-hidden rounded-xl border border-line">
+          {(people.data ?? []).length === 0 ? <li className="px-3 py-2 text-sm text-stone-500">Kimse yok.</li> : null}
+          {(people.data ?? []).map((person) => (
+            <li key={person._id}>
+              <button type="button" className="block w-full px-3 py-2 text-left text-sm hover:bg-stone-50" onClick={() => pick(person)}>
+                {person.name ?? person.username}
+                <span className="ml-2 text-xs text-stone-500">{person.username}</span>
+              </button>
             </li>
           ))}
         </ul>
-      )}
-      {canWrite ? (
-        <form
-          className="space-y-2 border-t border-line p-4"
-          onSubmit={(event) => {
-            event.preventDefault()
-            const data = new FormData(event.currentTarget)
-            const text = String(data.get('body') ?? '').trim()
-            if (!text) return
-            setPending(true)
-            void onAdd(text, data.get('internal') === 'on').finally(() => {
-              setPending(false)
-              event.currentTarget.reset()
-            })
-          }}
-        >
-          <Area name="body" placeholder="Yorum" required />
-          {canInternal ? (
-            <label className="flex items-center gap-2 text-sm">
-              <input name="internal" type="checkbox" /> İç not
-            </label>
-          ) : null}
-          <Button type="submit" disabled={pending}>Yorum yaz</Button>
-        </form>
       ) : null}
-    </Card>
+      {error ? <Banner>{error}</Banner> : null}
+      <div className="flex gap-2">
+        <Button type="submit" disabled={pending}>{pending ? 'Yazılıyor…' : submitLabel}</Button>
+        {onCancel ? <Button type="button" tone="ghost" onClick={onCancel}>Vazgeç</Button> : null}
+      </div>
+    </form>
   )
 }
 
